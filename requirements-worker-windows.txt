@@ -1,0 +1,10 @@
+# Install in FeiyuVoice/.singing-venv, never in the MaiBot host.
+yt-dlp==2026.10.26
+imageio-ffmpeg==0.7.0
+httpx>=0.28,<1
+numpy>=1.26
+soundfile>=0.13
+faster-whisper>=1.2
+pypinyin==0.55.0
+mido==1.3.3
+opencc-python-reimplemented==0.1.7

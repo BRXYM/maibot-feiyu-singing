@@ -1,0 +1,31 @@
+{
+  "manifest_version": 2,
+  "id": "github.brxym.feiyu-singing",
+  "name": "肥鱼按歌名学唱",
+  "version": "1.0.1",
+  "description": "搜索原曲、AI选段、人声分离、SOME提取MIDI、DiffSinger合成及肥鱼RVC清唱；任务绑定原QQ私聊。",
+  "author": {
+    "name": "BRXYM",
+    "url": "https://github.com/BRXYM"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/BRXYM/maibot-feiyu-singing"
+  },
+  "host_application": {
+    "min_version": "1.4.6",
+    "max_version": "1.4.99"
+  },
+  "sdk": {
+    "min_version": "2.23.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [
+    "chat.get_private_streams",
+    "send.text"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN"
+  }
+}

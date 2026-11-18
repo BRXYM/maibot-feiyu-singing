@@ -1,0 +1,14 @@
+# This isolated helper environment reuses the existing RVC environment's
+# torch 2.11.0+cu128 and torchaudio via feiyu_rvc_base.pth; it runs these stages on CPU.
+lightning==2.5.6
+pytorch-lightning==2.5.6
+demucs==4.0.1
+praat-parselmouth==0.4.7
+mido==1.3.3
+pypinyin==0.55.0
+diffsinger-utau==0.3.8
+textgrid==1.6.1
+tensorboardX==2.6.5
+chardet==7.7.0
+h5py==3.16.0
+pandas==2.3.3
