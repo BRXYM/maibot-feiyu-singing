@@ -1,0 +1,90 @@
+--- a/feiyu_runtime/rvc.py
++++ b/feiyu_runtime/rvc.py
+@@ -34,7 +34,7 @@
+     return digest.hexdigest()
+ 
+ 
+-def verify():
++def verify(weights="v1"):
+     for name, record in load(BUNDLE / "files_sha256.json").items():
+         path = (BUNDLE / name).resolve()
+         if (
+@@ -46,7 +46,17 @@
+     manifest = load(BUNDLE / "manifest.json")
+     if manifest["schema"] != "feiyu-rvc-release-v1":
+         raise ValueError("Unexpected package schema")
+-    return manifest
++    if weights == "v1":
++        return manifest
++    release = load(BUNDLE / "manifest-v2.json")
++    if release["schema"] != "feiyu-rvc-weight-release-v2" or release["candidate"] != "W61":
++        raise ValueError("Unexpected v2 weight release")
++    for key in ("pth", "index"):
++        path = (BUNDLE / release["model"][key]).resolve()
++        if not path.is_relative_to(BUNDLE) or sha(path) != release["model"][key+"_sha256"]:
++            raise ValueError("W61 model integrity check failed: " + key)
++    # W61 ships weights only. The verified base runtime supplies the sampling seed.
++    return {**release, "id":"FeiyuVoice-RVC-v2", "seed":manifest["seed"]}
+ 
+ 
+ def main(package, profile, argv=None):
+@@ -57,12 +67,14 @@
+     )
+     parser.add_argument("--input", type=Path)
+     parser.add_argument("--regions", type=Path)
++    parser.add_argument("--singing-weights", choices=("v1", "v2"), default="v1")
++    parser.add_argument("--review-singing-pitch", action="store_true")
+     parser.add_argument("--singing-octave", type=int, choices=(-12, 0, 12), default=0,
+                         help="Shift the sung fundamental by this many semitones")
+     parser.add_argument("--output-dir", type=Path)
+     parser.add_argument("--verify-only", action="store_true")
+     args = parser.parse_args(argv)
+-    manifest = verify()
++    manifest = verify(args.singing_weights)
+     if args.verify_only:
+         print(
+             json.dumps(
+@@ -125,14 +137,26 @@
+     f0_loads = []
+     import rvc.infer.pipeline as pipeline_module
+     original_rmvpe = pipeline_module.RMVPE
++    pitch_reviews = []
+ 
+     def configured_rmvpe(*args, **kwargs):
+         if profile.get("f0_device", "cpu") == "cpu":
+             kwargs["device"] = "cpu"
+         predictor = original_rmvpe(*args, **kwargs)
++        if args_review_pitch:
++            from feiyu_runtime.pitch_review import review_pitch
++            extract = predictor.get_f0
++
++            def checked_pitch(audio, **options):
++                contour, report = review_pitch(audio, extract(audio, **options), predictor.sample_rate, predictor.hop_size)
++                pitch_reviews.append(report)
++                return contour
++
++            predictor.get_f0 = checked_pitch
+         f0_loads.append(predictor)
+         return predictor
+ 
++    args_review_pitch = args.review_singing_pitch
+     pipeline_module.RMVPE = configured_rmvpe
+     model = manifest["model"]
+     model_path = (BUNDLE / model["pth"]).resolve()
+@@ -201,7 +225,7 @@
+             package=manifest["id"],
+             input=str(source),
+             input_sha256=sha(source),
+-            manifest_sha256=sha(BUNDLE / "manifest.json"),
++            manifest_sha256=sha(BUNDLE / ("manifest-v2.json" if args.singing_weights == "v2" else "manifest.json")),
+             parameters=params,
+         ),
+     )
+@@ -260,6 +284,7 @@
+         model_sha256=model["pth_sha256"],
+         index_sha256=model["index_sha256"],
+         inference=params,
++        pitch_reviews=pitch_reviews,
+         native_sha256=sha(native),
+         actual_model_loads=loads,
+         actual_synth_calls=calls,

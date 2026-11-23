@@ -2,8 +2,8 @@
   "manifest_version": 2,
   "id": "github.brxym.feiyu-singing",
   "name": "肥鱼按歌名学唱",
-  "version": "1.0.1",
-  "description": "搜索原曲、AI选段、人声分离、SOME提取MIDI、DiffSinger合成及肥鱼RVC清唱；任务绑定原QQ私聊。",
+  "version": "1.2.2",
+  "description": "整首分离原唱与伴奏，分段用肥鱼音色翻唱并混音；短试听支持 MIDI 提取与歌声合成。",
   "author": {
     "name": "BRXYM",
     "url": "https://github.com/BRXYM"
@@ -22,10 +22,15 @@
   },
   "dependencies": [],
   "capabilities": [
+    "api.call",
     "chat.get_private_streams",
-    "send.text"
+    "chat.open_session",
+    "message.get_recent",
+    "send.text",
+    "llm.generate"
   ],
   "i18n": {
     "default_locale": "zh-CN"
-  }
+  },
+  "plugin_type": "media"
 }

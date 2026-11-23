@@ -1,18 +1,104 @@
 """Public timed-lyric metadata; timing of the selected audio still comes from ASR."""
+from pathlib import Path
 import difflib
 import html
+import json
 import re
+import unicodedata
 import httpx
 from pypinyin import lazy_pinyin
 
 HAN=re.compile(r'[\u3400-\u9fff]')
 
+CREDIT = re.compile(
+    r'^(?:(?:作[词詞曲]|[词詞曲]|[编編]曲|制作人|[录錄]音(?:室|师|師)?|混音(?:师|師)?|监制|'
+    r'歌曲(?:介绍|简介)|专辑(?:介绍|简介)|歌手|演唱|发行(?:公司)?|出品(?:公司)?|版权|文案|旁白|独白|念白|对白|'
+    r'recording engineers?|mixing engineers?|(?:recording|mixing) studios?|musicians?|guitars?|bass|drums?|'
+    r'background vocals?(?: arrangement)?|producer|lyrics(?: by)?|composed by|spoken(?: intro| outro)?|narration|op|sp)\s*[:：]|'
+    r'ISRC\s*[:： ]\s*[A-Z]{2}[- ]?[A-Z0-9]{3})', re.I)
+SPOKEN = re.compile(r'^[\[【(（](?:旁白|独白|念白|对白|歌曲介绍|spoken(?: intro| outro| word)?|narration)[\]】)）]', re.I)
+SECTION = re.compile(r'^[\[【](?:verse|chorus|bridge|intro|outro|pre-chorus|rap|主歌|副歌|桥段)(?:\s*\d+)?[\]】]\s*', re.I)
+RELEASE_NOTE = re.compile(r'^(?:本首歌(?:曲)?|本曲|这首歌曲|该曲|歌曲《[^》]{1,80}》)(?:收录[于在]|发行于|由.{1,24}(?:作词|作曲|制作|演唱))')
+
+
+def clean_line(value):
+    value = value.strip()
+    if CREDIT.match(value) or RELEASE_NOTE.match(value) or SPOKEN.match(value) or re.fullmatch(r'\[(?:ar|ti|al|by|offset|length|re|ve):[^\]]*\]',value,re.I):
+        return ''
+    value = SECTION.sub('', value).strip()
+    return '' if re.fullmatch(r'[\[【(（][^\]】)）]{1,40}[\]】)）]',value) and any(
+        word in value.casefold() for word in ('间奏','前奏','尾奏','instrumental','music break')) else value
+
+
+def clean_reference(data):
+    titles = set()
+    song = normalized_name(data.get('song',''))
+    for artist in data.get('artist',[]):
+        name = normalized_name(artist)
+        titles.update(((song,name),(name,song)))
+    lines = []
+    for row in data.get('lines',[]):
+        text = clean_line(row['text'])
+        if text and tuple(re.split(r'\s*[-–—]\s*',normalized_name(text),maxsplit=1)) not in titles:
+            lines.append({**row,'text':text})
+    if len(lines) < 5:
+        raise ValueError('清理后可用的演唱歌词不足')
+    return {**data, 'lines':lines}
+
+
+def normalized_name(value: str) -> str:
+    return unicodedata.normalize('NFKC', value).strip().casefold()
+
+
+def cached_verified_lyrics(jobs: Path, song: str, artist: str) -> dict | None:
+    """Reuse source-backed timed lyrics only from earlier successful jobs."""
+    candidates = []
+    identities = set()
+    for path in jobs.glob('*/verified-lyrics.json'):
+        try:
+            if not re.fullmatch('[0-9a-f]{32}', path.parent.name):
+                continue
+            lyrics = json.loads(path.read_text('utf-8'))
+            if normalized_name(lyrics['song']) != normalized_name(song) or not lyrics['source_url']:
+                continue
+            names = frozenset(normalized_name(name) for name in lyrics['artist'] if isinstance(name, str) and name.strip())
+            if not names or (artist and normalized_name(artist) not in names):
+                continue
+            lines = lyrics['lines']
+            if len(lines) < 5 or not all(isinstance(line['time'], (int, float)) and line['time'] >= 0
+                                         and isinstance(line['text'], str) and line['text'].strip() for line in lines):
+                continue
+            result = json.loads(path.with_name('result.json').read_text('utf-8'))
+            if result.get('status') != 'success':
+                continue
+            candidates.append((float(result.get('finished_at') or path.stat().st_mtime), clean_reference(lyrics)))
+            identities.add(names)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+    if candidates and (artist or len(identities) == 1):
+        return max(candidates, key=lambda row: row[0])[1]
+    return None
+
+
 def parse_lrc(raw):
     lines=[]
-    for line in html.unescape(raw).splitlines():
+    # Only suppress an entire marked spoken block when a later sung-section tag
+    # gives it a clear end. Some LRC files mark just the opening spoken line.
+    entries = html.unescape(raw).splitlines()
+    time_tag = re.compile(r'\[\d+:\d+(?:\.\d+)?\]')
+    last_sung_marker = max((i for i,line in enumerate(entries) if SECTION.match(time_tag.sub('',line).strip())),default=-1)
+    in_spoken_block = False
+    for i,line in enumerate(entries):
+        content = time_tag.sub('',line).strip()
+        if SECTION.match(content):
+            in_spoken_block = False
+        elif SPOKEN.fullmatch(content) and i < last_sung_marker:
+            in_spoken_block = True
+        if in_spoken_block:
+            continue
         timestamps=re.findall(r'\[(\d+):(\d+(?:\.\d+)?)\]',line)
-        text=re.sub(r'\[[^]]*\]','',line).strip()
-        if not timestamps or not text or any(k in text for k in ['作词','作曲','编曲','制作人','录音','混音']):
+        text=clean_line(content)
+        if not timestamps or not text:
             continue
         for minute,second in timestamps:
             lines.append({'time':int(minute)*60+float(second),'text':text})
@@ -49,11 +135,47 @@ def qq_lyrics(song,artist):
         return {'song_id':entry['songmid'],'song':entry['songname'],'artist':[a['name'] for a in entry['singer']],
                 'provider':'qq_music','source_url':'https://y.qq.com/n/ryqq/songDetail/'+entry['songmid'],'lines':parse_lrc(response.json().get('lyric',''))}
 
-def fetch_lyrics(song,artist):
+def lrclib_lyrics(song, artist):
+    def normalized(value):
+        return unicodedata.normalize('NFKC', value).strip().casefold()
+
+    with httpx.Client(timeout=12, headers={'User-Agent': 'FeiyuSinging/1.1 (MaiBot lyric lookup)'}) as client:
+        response = client.get('https://lrclib.net/api/search', params={'track_name': song, 'artist_name': artist})
+        response.raise_for_status()
+        for row in response.json():
+            if (normalized(row.get('trackName', '')) != normalized(song)
+                    or (artist and normalized(row.get('artistName', '')) != normalized(artist))
+                    or row.get('instrumental') or not row.get('syncedLyrics')):
+                continue
+            try:
+                lines = parse_lrc(row['syncedLyrics'])
+            except ValueError:
+                continue
+            return {'song_id': row['id'], 'song': row['trackName'], 'artist': [row['artistName']],
+                    'source_url': 'https://lrclib.net/api/get/' + str(row['id']), 'provider': 'lrclib', 'lines': lines}
+    raise ValueError('LRCLIB 未找到同名同歌手的时间歌词')
+
+
+PROVIDER_KEYS = {'netease_lyrics': 'netease', 'qq_lyrics': 'qq_music', 'lrclib_lyrics': 'lrclib'}
+
+
+def fetch_lyrics(song,artist, *, accept=None, cached=None):
     failures=[]
-    for provider in [netease_lyrics,qq_lyrics]:
+    if cached is not None:
         try:
-            result=provider(song,artist)
+            cached=clean_reference(cached)
+            if accept:
+                accept(cached)
+            return cached
+        except ValueError as exc:
+            failures.append({'provider':cached.get('provider','cached'),'error':str(exc)[:300]})
+    for provider in (netease_lyrics,qq_lyrics,lrclib_lyrics):
+        if cached and cached.get('provider') == PROVIDER_KEYS.get(provider.__name__):
+            continue
+        try:
+            result=clean_reference(provider(song,artist))
+            if accept:
+                accept(result)
             result['source_attempts']=failures
             return result
         except (httpx.HTTPError,ValueError,KeyError,TypeError) as exc:
